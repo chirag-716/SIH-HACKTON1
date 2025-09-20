@@ -1,0 +1,159 @@
+version: '3.8'
+
+services:
+  # PostgreSQL Database
+  postgres:
+    image: postgres:15-alpine
+    container_name: guvnl_postgres
+    environment:
+      POSTGRES_DB: guvnl_queue_db
+      POSTGRES_USER: guvnl_user
+      POSTGRES_PASSWORD: guvnl_password
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./database/init.sql:/docker-entrypoint-initdb.d/init.sql
+    networks:
+      - guvnl_network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U guvnl_user -d guvnl_queue_db"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Redis Cache
+  redis:
+    image: redis:7-alpine
+    container_name: guvnl_redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    networks:
+      - guvnl_network
+    command: redis-server --appendonly yes
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Flask Backend API
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: guvnl_backend
+    environment:
+      - FLASK_ENV=development
+      - DATABASE_URL=postgresql://guvnl_user:guvnl_password@postgres:5432/guvnl_queue_db
+      - REDIS_URL=redis://redis:6379/0
+      - JWT_SECRET_KEY=your-secret-key-change-in-production
+      - TWILIO_ACCOUNT_SID=your-twilio-sid
+      - TWILIO_AUTH_TOKEN=your-twilio-token
+      - SMTP_SERVER=smtp.gmail.com
+      - SMTP_PORT=587
+      - SMTP_USERNAME=your-email@gmail.com
+      - SMTP_PASSWORD=your-email-password
+    ports:
+      - "5000:5000"
+    volumes:
+      - ./backend:/app
+    networks:
+      - guvnl_network
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    command: python app.py
+
+  # Celery Worker for Background Tasks
+  celery_worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: guvnl_celery_worker
+    environment:
+      - FLASK_ENV=development
+      - DATABASE_URL=postgresql://guvnl_user:guvnl_password@postgres:5432/guvnl_queue_db
+      - REDIS_URL=redis://redis:6379/0
+      - TWILIO_ACCOUNT_SID=your-twilio-sid
+      - TWILIO_AUTH_TOKEN=your-twilio-token
+      - SMTP_SERVER=smtp.gmail.com
+      - SMTP_PORT=587
+      - SMTP_USERNAME=your-email@gmail.com
+      - SMTP_PASSWORD=your-email-password
+    volumes:
+      - ./backend:/app
+    networks:
+      - guvnl_network
+    depends_on:
+      - postgres
+      - redis
+    command: celery -A app.celery worker --loglevel=info
+
+  # Celery Beat Scheduler
+  celery_beat:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: guvnl_celery_beat
+    environment:
+      - FLASK_ENV=development
+      - DATABASE_URL=postgresql://guvnl_user:guvnl_password@postgres:5432/guvnl_queue_db
+      - REDIS_URL=redis://redis:6379/0
+    volumes:
+      - ./backend:/app
+    networks:
+      - guvnl_network
+    depends_on:
+      - postgres
+      - redis
+    command: celery -A app.celery beat --loglevel=info
+
+  # React Frontend
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: guvnl_frontend
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+    networks:
+      - guvnl_network
+    environment:
+      - REACT_APP_API_URL=http://localhost:5000
+      - REACT_APP_SOCKET_URL=http://localhost:5000
+    depends_on:
+      - backend
+
+  # Nginx Load Balancer
+  nginx:
+    image: nginx:alpine
+    container_name: guvnl_nginx
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./deployment/nginx/nginx.conf:/etc/nginx/nginx.conf
+      - ./deployment/nginx/default.conf:/etc/nginx/conf.d/default.conf
+    networks:
+      - guvnl_network
+    depends_on:
+      - backend
+      - frontend
+
+volumes:
+  postgres_data:
+    driver: local
+  redis_data:
+    driver: local
+
+networks:
+  guvnl_network:
+    driver: bridge
